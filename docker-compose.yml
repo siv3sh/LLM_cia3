@@ -1,0 +1,165 @@
+version: '3.8'
+
+services:
+  # Main application service
+  attrition-analysis-app:
+    build: .
+    container_name: attrition-analysis-app
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - DATABASE_URL=${DATABASE_URL}
+      - VECTOR_STORE_PATH=/app/vector_store
+      - LOG_FILE=/app/logs/app.log
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+    volumes:
+      - ./logs:/app/logs
+      - ./exports:/app/exports
+      - ./vector_store:/app/vector_store
+      - ./models:/app/models
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    networks:
+      - attrition-network
+
+  # PostgreSQL database
+  postgres:
+    image: postgres:15-alpine
+    container_name: attrition-postgres
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-attrition_db}
+      - POSTGRES_USER=${POSTGRES_USER:-attrition_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-attrition_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    networks:
+      - attrition-network
+
+  # Redis for caching and session management
+  redis:
+    image: redis:7-alpine
+    container_name: attrition-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - attrition-network
+
+  # Vector database (ChromaDB)
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: attrition-chromadb
+    environment:
+      - CHROMA_SERVER_HOST=0.0.0.0
+      - CHROMA_SERVER_HTTP_PORT=8000
+      - CHROMA_SERVER_CORS_ALLOW_ORIGINS=["*"]
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    restart: unless-stopped
+    networks:
+      - attrition-network
+
+  # Monitoring and metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: attrition-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    networks:
+      - attrition-network
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: attrition-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - attrition-network
+
+  # Nginx reverse proxy
+  nginx:
+    image: nginx:alpine
+    container_name: attrition-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+    depends_on:
+      - attrition-analysis-app
+    restart: unless-stopped
+    networks:
+      - attrition-network
+
+  # Backup service
+  backup:
+    image: postgres:15-alpine
+    container_name: attrition-backup
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-attrition_db}
+      - POSTGRES_USER=${POSTGRES_USER:-attrition_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-attrition_password}
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup.sh:/backup.sh
+    command: ["/bin/sh", "-c", "while true; do sleep 86400; done"]
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks:
+      - attrition-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  chroma_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  attrition-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
